@@ -31,9 +31,28 @@ function playerList(room) {
   return [...room.players.values()].map((p) => ({ id: p.id, name: p.name, on: !!p.ws }));
 }
 
+const watchers = new Set(); // telefony na obrazovce „Online hra“ – dostávají seznam otevřených her
+
+function openRooms() {
+  const out = [];
+  for (const r of rooms.values()) {
+    if (r.locked) continue;
+    const host = r.players.get(r.host);
+    if (!host || !host.ws) continue;
+    out.push({ code: r.code, host: host.name, n: r.players.size, names: [...r.players.values()].map((p) => p.name) });
+  }
+  return out;
+}
+
+function pushRooms() {
+  const msg = { op: "rooms", rooms: openRooms() };
+  for (const w of watchers) send(w, msg);
+}
+
 function broadcastPlayers(room) {
   const msg = { op: "players", players: playerList(room), host: room.host, locked: room.locked };
   for (const p of room.players.values()) send(p.ws, msg);
+  pushRooms();
 }
 
 wss.on("connection", (ws) => {
@@ -51,6 +70,12 @@ wss.on("connection", (ws) => {
     }
     if (m.op === "ping") return send(ws, { op: "pong", t: m.t });
 
+    if (m.op === "list") {
+      watchers.add(ws);
+      return send(ws, { op: "rooms", rooms: openRooms() });
+    }
+    if (m.op === "create" || m.op === "join") watchers.delete(ws);
+
     if (m.op === "create" && !room) {
       let code = makeCode();
       const want = String(m.code || "").toUpperCase();
@@ -60,6 +85,7 @@ wss.on("connection", (ws) => {
       room.players.set(1, me);
       rooms.set(code, room);
       send(ws, { op: "welcome", id: 1, code, host: 1, players: playerList(room) });
+      pushRooms();
       return;
     }
 
@@ -120,12 +146,14 @@ wss.on("connection", (ws) => {
   });
 
   ws.on("close", () => {
+    watchers.delete(ws);
     if (!room || !me) return;
     me.ws = null;
     if (me.id === room.host) {
       // hostitel odešel – hra končí
       for (const p of room.players.values()) send(p.ws, { op: "closed" });
       rooms.delete(room.code);
+      pushRooms();
       return;
     }
     if (!room.locked) room.players.delete(me.id);
